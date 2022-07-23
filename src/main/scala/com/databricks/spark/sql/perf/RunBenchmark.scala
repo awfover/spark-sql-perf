@@ -18,9 +18,10 @@ package com.databricks.spark.sql.perf
 
 import java.net.InetAddress
 import java.io.File
-import org.apache.spark.sql.{SQLContext, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
-import org.apache.spark.{SparkContext, SparkConf}
+import org.apache.spark.SparkConf
+
 import scala.util.Try
 
 case class RunConfig(
@@ -28,7 +29,8 @@ case class RunConfig(
     benchmarkName: String = null,
     filter: Option[String] = None,
     iterations: Int = 3,
-    baseline: Option[Long] = None)
+    baseline: Option[Long] = None,
+    jdbcUrl: Option[String] = None)
 
 /**
  * Runs a benchmark locally and prints the results to the screen.
@@ -53,6 +55,9 @@ object RunBenchmark {
       opt[Long]('c', "compare")
           .action((x, c) => c.copy(baseline = Some(x)))
           .text("the timestamp of the baseline experiment to compare with")
+      opt[String]('u', "url")
+        .action((x, c) => c.copy(jdbcUrl = Some(x)))
+        .text("the url to create jdbc connection")
       help("help")
         .text("prints this usage text")
     }
@@ -88,10 +93,19 @@ object RunBenchmark {
           .asInstanceOf[Benchmark]
     }
 
-    val allQueries = config.filter.map { f =>
+    val filteredQueries = config.filter.map { f =>
       benchmark.allQueries.filter(_.name contains f)
     } getOrElse {
       benchmark.allQueries
+    }
+
+    val allQueries = config.jdbcUrl.map { url =>
+      filteredQueries
+        .collect { case q: Query => q }
+        .map(JdbcQuery(url, _))
+        .collect { case Some(q: JdbcQuery) => q }
+    } getOrElse {
+      filteredQueries
     }
 
     println("== QUERY LIST ==")

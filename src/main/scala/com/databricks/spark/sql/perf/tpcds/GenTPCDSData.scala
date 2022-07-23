@@ -20,17 +20,17 @@ import org.apache.spark.sql.SparkSession
 
 case class GenTPCDSDataConfig(
     master: String = "local[*]",
-    dsdgenDir: String = null,
-    scaleFactor: String = null,
+    dsdgenDir: String = "/Users/awfover/Projects/spark-sql-perf/tpcds-kit/tools",
+    scaleFactor: String = "1",
     location: String = null,
-    format: String = null,
+    format: String = "cassandra",
     useDoubleForDecimal: Boolean = false,
     useStringForDate: Boolean = false,
     overwrite: Boolean = false,
     partitionTables: Boolean = true,
     clusterByPartitionColumns: Boolean = true,
     filterOutNullPartitionValues: Boolean = true,
-    tableFilter: String = "",
+    tableFilter: String = "web_sales",
     numPartitions: Int = 100)
 
 /**
@@ -49,7 +49,7 @@ object GenTPCDSData {
       opt[String]('d', "dsdgenDir")
         .action { (x, c) => c.copy(dsdgenDir = x) }
         .text("location of dsdgen")
-        .required()
+//        .required()
       opt[String]('s', "scaleFactor")
         .action((x, c) => c.copy(scaleFactor = x))
         .text("scaleFactor defines the size of the dataset to generate (in GB)")
@@ -100,6 +100,8 @@ object GenTPCDSData {
       .builder()
       .appName(getClass.getName)
       .master(config.master)
+      .config("spark.cassandra.connection.host", "192.168.1.26:9042")
+      .config("spark.sql.catalog.tpcds_01", "com.datastax.spark.connector.datasource.CassandraCatalog")
       .getOrCreate()
 
     val tables = new TPCDSTables(spark.sqlContext,
@@ -108,10 +110,14 @@ object GenTPCDSData {
       useDoubleForDecimal = config.useDoubleForDecimal,
       useStringForDate = config.useStringForDate)
 
+    spark.sql("use tpcds_01")
+
     tables.genData(
       location = config.location,
       format = config.format,
+      databaseName = "tpcds_01",
       overwrite = config.overwrite,
+      options = Map(),
       partitionTables = config.partitionTables,
       clusterByPartitionColumns = config.clusterByPartitionColumns,
       filterOutNullPartitionValues = config.filterOutNullPartitionValues,

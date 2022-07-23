@@ -6,6 +6,7 @@ sbt/*.jar
 .idea
 .idea_modules
 *.iml
+.bsp
 
 # sbt specific
 build/*.jar
@@ -19,3 +20,7 @@ src_managed/
 project/boot/
 project/plugins/project/
 performance/
+
+spark-log/
+spark-warehouse/
+metastore_db/

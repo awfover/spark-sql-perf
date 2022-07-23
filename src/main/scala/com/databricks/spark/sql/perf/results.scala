@@ -16,7 +16,10 @@
 
 package com.databricks.spark.sql.perf
 
-import com.databricks.spark.sql.perf.mllib.ReflectionUtils
+//import com.databricks.spark.sql.perf.mllib.ReflectionUtils
+import org.apache.commons.collections.map.SingletonMap
+
+import scala.collection.immutable.HashMap
 
 /**
  * The performance results of all given queries for a single iteration.
@@ -156,13 +159,14 @@ class MLParams(
    */
   def toMap: Map[String, String] = {
     // Only outputs params that have values
-    val allParams = ReflectionUtils.getConstructorArgs(this)
-    allParams.flatMap {
-      case (key: String, Some(value: Any)) =>
-        Some(key -> value.toString)
-      case _ =>
-        None
-    }
+//    val allParams = ReflectionUtils.getConstructorArgs(this)
+//    allParams.flatMap {
+//      case (key: String, Some(value: Any)) =>
+//        Some(key -> value.toString)
+//      case _ =>
+//        None
+//    }
+    HashMap()
   }
 
   /** Returns a copy of the current MLParams instance */

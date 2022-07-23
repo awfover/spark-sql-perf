@@ -17,14 +17,12 @@
 package com.databricks.spark.sql.perf
 
 import java.util.concurrent.LinkedBlockingQueue
-
 import scala.collection.immutable.Stream
 import scala.sys.process._
-
 import org.slf4j.LoggerFactory
-
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.connector.catalog.{Identifier, TableCatalog}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{Row, SQLContext, SaveMode}
@@ -41,10 +39,10 @@ import org.apache.spark.sql.{Row, SQLContext, SaveMode}
 object BlockingLineStream {
   // See scala.sys.process.Streamed
   private final class BlockingStreamed[T](
-    val process:   T => Unit,
-    val    done: Int => Unit,
-    val  stream:  () => Stream[T]
-  )
+                                           val process: T => Unit,
+                                           val done: Int => Unit,
+                                           val stream: () => Stream[T]
+                                         )
 
   // See scala.sys.process.Streamed
   private object BlockingStreamed {
@@ -69,8 +67,13 @@ object BlockingLineStream {
   // See scala.sys.process.ProcessImpl.Spawn
   private object Spawn {
     def apply(f: => Unit): Thread = apply(f, daemon = false)
+
     def apply(f: => Unit, daemon: Boolean): Thread = {
-      val thread = new Thread() { override def run() = { f } }
+      val thread = new Thread() {
+        override def run() = {
+          f
+        }
+      }
       thread.setDaemon(daemon)
       thread.start()
       thread
@@ -87,18 +90,19 @@ object BlockingLineStream {
 
 trait DataGenerator extends Serializable {
   def generate(
-    sparkContext: SparkContext,
-    name: String,
-    partitions: Int,
-    scaleFactor: String): RDD[String]
+                sparkContext: SparkContext,
+                name: String,
+                partitions: Int,
+                scaleFactor: String): RDD[String]
 }
 
 
 abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
-    useDoubleForDecimal: Boolean = false, useStringForDate: Boolean = false)
-    extends Serializable {
+                      useDoubleForDecimal: Boolean = false, useStringForDate: Boolean = false)
+  extends Serializable {
 
   def dataGenerator: DataGenerator
+
   def tables: Seq[Table]
 
   private val log = LoggerFactory.getLogger(getClass)
@@ -109,12 +113,12 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
     val schema = StructType(fields)
 
     def nonPartitioned: Table = {
-      Table(name, Nil, fields : _*)
+      Table(name, Nil, fields: _*)
     }
 
     /**
-     *  If convertToSchema is true, the data from generator will be parsed into columns and
-     *  converted to `schema`. Otherwise, it just outputs the raw data (as a single STRING column).
+     * If convertToSchema is true, the data from generator will be parsed into columns and
+     * converted to `schema`. Otherwise, it just outputs the raw data (as a single STRING column).
      */
     def df(convertToSchema: Boolean, numPartition: Int) = {
       val generatedData = dataGenerator.generate(sparkContext, name, numPartition, scaleFactor)
@@ -165,86 +169,107 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
         field.copy(dataType = newDataType)
       }
 
-      Table(name, partitionColumns, newFields:_*)
+      Table(name, partitionColumns, newFields: _*)
     }
 
     def genData(
-      location: String,
-      format: String,
-      overwrite: Boolean,
-      clusterByPartitionColumns: Boolean,
-      filterOutNullPartitionValues: Boolean,
-      numPartitions: Int): Unit = {
+                 location: String,
+                 format: String,
+                 databaseName: String,
+                 overwrite: Boolean,
+                 options: Map[String,String],
+                 clusterByPartitionColumns: Boolean,
+                 filterOutNullPartitionValues: Boolean,
+                 numPartitions: Int): Unit = {
       val mode = if (overwrite) SaveMode.Overwrite else SaveMode.Ignore
 
       val data = df(format != "text", numPartitions)
       val tempTableName = s"${name}_text"
       data.createOrReplaceTempView(tempTableName)
 
-      val writer = if (partitionColumns.nonEmpty) {
-        if (clusterByPartitionColumns) {
-          val columnString = data.schema.fields.map { field =>
-            field.name
-          }.mkString(",")
-          val partitionColumnString = partitionColumns.mkString(",")
-          val predicates = if (filterOutNullPartitionValues) {
-            partitionColumns.map(col => s"$col IS NOT NULL").mkString("WHERE ", " AND ", "")
-          } else {
-            ""
-          }
+//      val primaryKey = (name: String) => if (partitionColumns.contains(name)) {
+//          "PRIMARY KEY"
+//        } else {
+//          ""
+//        }
+      val columns = fields.map(field => s"${field.name} ${field.dataType.typeName}").mkString(",")
+//      val partitionKeys = if (partitionColumns.nonEmpty) partitionColumns.mkString(",") else fields.head.name
+//      val partitionKeys = if (partitionColumns.nonEmpty) partitionColumns.head else fields.head.name
+      val partitionKey = partitionColumns.head
+      val clusteringKeys = if (partitionColumns.size > 1) partitionColumns.drop(1).mkString(",") else ""
 
-          val query =
-            s"""
-               |SELECT
-               |  $columnString
-               |FROM
-               |  $tempTableName
-               |$predicates
-               |DISTRIBUTE BY
-               |  $partitionColumnString
-            """.stripMargin
-          val grouped = sqlContext.sql(query)
-          println(s"Pre-clustering with partitioning columns with query $query.")
-          log.info(s"Pre-clustering with partitioning columns with query $query.")
-          grouped.write
-        } else {
-          data.write
-        }
-      } else {
-        // treat non-partitioned tables as "one partition" that we want to coalesce
-        if (clusterByPartitionColumns) {
-          // in case data has more than maxRecordsPerFile, split into multiple writers to improve datagen speed
-          // files will be truncated to maxRecordsPerFile value, so the final result will be the same
-          val numRows = data.count
-          val maxRecordPerFile = util.Try(sqlContext.getConf("spark.sql.files.maxRecordsPerFile").toInt).getOrElse(0)
+      sqlContext.sql(s"create table if not exists $databaseName.$name($columns) using $format partitioned by ($partitionKey) " +
+        (if (clusteringKeys.nonEmpty)
+        "TBLPROPERTIES (" +
+        s"clustering_key='$clusteringKeys'" +
+        ")" else "" ))
 
-          println(s"Data has $numRows rows clustered $clusterByPartitionColumns for $maxRecordPerFile")
-          log.info(s"Data has $numRows rows clustered $clusterByPartitionColumns for $maxRecordPerFile")
-
-          if (maxRecordPerFile > 0 && numRows > maxRecordPerFile) {
-            val numFiles = (numRows.toDouble/maxRecordPerFile).ceil.toInt
-            println(s"Coalescing into $numFiles files")
-            log.info(s"Coalescing into $numFiles files")
-            data.coalesce(numFiles).write
-          } else {
-            data.coalesce(1).write
-          }
-        } else {
-          data.write
-        }
-      }
-      writer.format(format).mode(mode)
-      if (partitionColumns.nonEmpty) {
-        writer.partitionBy(partitionColumns : _*)
-      }
+      val writer = data.write
+//      val writer = if (partitionColumns.nonEmpty) {
+//        if (clusterByPartitionColumns) {
+//          val columnString = data.schema.fields.map { field =>
+//            field.name
+//          }.mkString(",")
+//          val partitionColumnString = partitionColumns.mkString(",")
+//          val predicates = if (filterOutNullPartitionValues) {
+//            partitionColumns.map(col => s"$col IS NOT NULL").mkString("WHERE ", " AND ", "")
+//          } else {
+//            ""
+//          }
+//
+//          val query =
+//            s"""
+//               |SELECT
+//               |  $columnString
+//               |FROM
+//               |  $tempTableName
+//               |$predicates
+//               |DISTRIBUTE BY
+//               |  $partitionColumnString
+//            """.stripMargin
+//          val grouped = sqlContext.sql(query)
+//          println(s"Pre-clustering with partitioning columns with query $query.")
+//          log.info(s"Pre-clustering with partitioning columns with query $query.")
+//          grouped.write
+//        } else {
+//          data.write
+//        }
+//      } else {
+//        // treat non-partitioned tables as "one partition" that we want to coalesce
+//        if (clusterByPartitionColumns) {
+//          // in case data has more than maxRecordsPerFile, split into multiple writers to improve datagen speed
+//          // files will be truncated to maxRecordsPerFile value, so the final result will be the same
+//          val numRows = data.count
+//          val maxRecordPerFile = util.Try(sqlContext.getConf("spark.sql.files.maxRecordsPerFile").toInt).getOrElse(0)
+//
+//          println(s"Data has $numRows rows clustered $clusterByPartitionColumns for $maxRecordPerFile")
+//          log.info(s"Data has $numRows rows clustered $clusterByPartitionColumns for $maxRecordPerFile")
+//
+//          if (maxRecordPerFile > 0 && numRows > maxRecordPerFile) {
+//            val numFiles = (numRows.toDouble / maxRecordPerFile).ceil.toInt
+//            println(s"Coalescing into $numFiles files")
+//            log.info(s"Coalescing into $numFiles files")
+//            data.coalesce(numFiles).write
+//          } else {
+//            data.coalesce(1).write
+//          }
+//        } else {
+//          data.write
+//        }
+//      }
+      writer.format(format).options(options).mode(mode)
+      writer.option("table", name)
+//      if (partitionColumns.nonEmpty) {
+//        writer.partitionBy(partitionColumns: _*)
+//      }
       println(s"Generating table $name in database to $location with save mode $mode.")
       log.info(s"Generating table $name in database to $location with save mode $mode.")
-      writer.save(location)
+      writer.save()
       sqlContext.dropTempTable(tempTableName)
     }
 
     def createExternalTable(location: String, format: String, databaseName: String,
-      overwrite: Boolean, discoverPartitions: Boolean = true): Unit = {
+                            overwrite: Boolean, discoverPartitions: Boolean = true): Unit = {
 
       val qualifiedTableName = databaseName + "." + name
       val tableExists = sqlContext.tableNames(databaseName).contains(name)
@@ -269,6 +294,30 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
       sqlContext.read.format(format).load(location).createOrReplaceTempView(name)
     }
 
+    def importTable(location: String, srcFormat: String, dstFormat: String, databaseName: String, overwrite: Boolean): Unit = {
+      if (tableExists(databaseName)) {
+        if (!overwrite) {
+          println(s"$databaseName.$name exists.")
+          log.info(s"$databaseName.$name exists.")
+          return
+        }
+
+        sqlContext.sql(s"drop table if exists $databaseName.$name")
+      }
+
+      val tempViewName = s"${databaseName}_${name}_temp"
+      val columns = fields.map(field => s"${field.name} ${field.dataType.typeName}").mkString(",")
+      val partitionKeys = if (partitionColumns.nonEmpty) partitionColumns.mkString(",") else fields.head.name
+      val df = sqlContext.read.format(srcFormat).schema(schema).load(location)
+      df.createOrReplaceTempView(tempViewName)
+
+      sqlContext.sql(s"create table if not exists $databaseName.$name($columns) using $dstFormat partitioned by ($partitionKeys)");
+      sqlContext.sql(s"insert into $databaseName.${name} table $tempViewName")
+
+      println(s"Importing table $name in database $databaseName using data stored in $location.")
+      log.info(s"Importing table $name in database $databaseName using data stored in $location.")
+    }
+
     def analyzeTable(databaseName: String, analyzeColumns: Boolean = false): Unit = {
       println(s"Analyzing table $name.")
       log.info(s"Analyzing table $name.")
@@ -280,22 +329,30 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
         sqlContext.sql(s"ANALYZE TABLE $databaseName.$name COMPUTE STATISTICS FOR COLUMNS $allColumns")
       }
     }
+
+    def tableExists(databaseName: String): Boolean = {
+      val catalog = sqlContext.sparkSession.sessionState.catalogManager.currentCatalog
+      catalog.isInstanceOf[TableCatalog] &&
+        catalog.asInstanceOf[TableCatalog].tableExists(Identifier.of(Array(databaseName), name))
+    }
   }
 
   def genData(
-      location: String,
-      format: String,
-      overwrite: Boolean,
-      partitionTables: Boolean,
-      clusterByPartitionColumns: Boolean,
-      filterOutNullPartitionValues: Boolean,
-      tableFilter: String = "",
-      numPartitions: Int = 100): Unit = {
-    var tablesToBeGenerated = if (partitionTables) {
+               location: String,
+               format: String,
+               databaseName: String,
+               overwrite: Boolean,
+               options: Map[String, String],
+               partitionTables: Boolean,
+               clusterByPartitionColumns: Boolean,
+               filterOutNullPartitionValues: Boolean,
+               tableFilter: String = "",
+               numPartitions: Int = 100): Unit = {
+    var tablesToBeGenerated = (if (partitionTables) {
       tables
     } else {
       tables.map(_.nonPartitioned)
-    }
+    }).filter(t => !("catalog_returns" :: "inventory" :: "store_sales" :: "web_sales" :: "catalog_sales" :: "store_returns" :: "web_returns" :: Nil).contains(t.name))
 
     if (!tableFilter.isEmpty) {
       tablesToBeGenerated = tablesToBeGenerated.filter(_.name == tableFilter)
@@ -306,13 +363,13 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
 
     tablesToBeGenerated.foreach { table =>
       val tableLocation = s"$location/${table.name}"
-      table.genData(tableLocation, format, overwrite, clusterByPartitionColumns,
+      table.genData(tableLocation, format, databaseName, overwrite, options, clusterByPartitionColumns,
         filterOutNullPartitionValues, numPartitions)
     }
   }
 
   def createExternalTables(location: String, format: String, databaseName: String,
-      overwrite: Boolean, discoverPartitions: Boolean, tableFilter: String = ""): Unit = {
+                           overwrite: Boolean, discoverPartitions: Boolean, tableFilter: String = ""): Unit = {
 
     val filtered = if (tableFilter.isEmpty) {
       tables
@@ -340,6 +397,27 @@ abstract class Tables(sqlContext: SQLContext, scaleFactor: String,
       val tableLocation = s"$location/${table.name}"
       table.createTemporaryTable(tableLocation, format)
     }
+  }
+
+  def importTables(location: String, srcFormat: String, dstFormat: String, databaseName: String, overwrite: Boolean, tableFilter: String = ""): Unit = {
+    val filtered = if (tableFilter.isEmpty) {
+      tables
+    } else {
+      tables.filter(_.name == tableFilter)
+    }
+
+    sqlContext.sql(s"CREATE DATABASE IF NOT EXISTS $databaseName")
+    var finished = 0
+    filtered.foreach { table =>
+      val tableLocation = s"$location/${table.name}"
+      table.importTable(tableLocation, srcFormat, dstFormat, databaseName, overwrite)
+      finished += 1
+      println(s"$finished/${filtered.size}")
+    }
+
+    sqlContext.sql(s"USE $databaseName")
+    println(s"The current database has been set to $databaseName.")
+    log.info(s"The current database has been set to $databaseName.")
   }
 
   def analyzeTables(databaseName: String, analyzeColumns: Boolean = false, tableFilter: String = ""): Unit = {
